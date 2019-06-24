@@ -48,6 +48,11 @@ NTSTATUS RVM(ULONG PID, MEMORY_REQUEST* sent) {
 	PVOID Address = (PVOID)sent->read.Address;
 	SIZE_T Size = sent->read.Size;
 	PVOID* Buffer = (PVOID*)ExAllocatePool(NonPagedPool, Size); // Pointer to Allocated Memory
+	
+	if (Buffer == NULL)
+		return STATUS_MEMORY_NOT_ALLOCATED;
+	
+	*Buffer = (PVOID)1; // To ensure it isnt NULL
 
 	KeStackAttachProcess(Process, &APC);
 
@@ -92,6 +97,8 @@ NTSTATUS RVM(ULONG PID, MEMORY_REQUEST* sent) {
 
 	// Send Buffer value to Usermode
 	memcpy(sent->read.Response, Buffer, Size);
+	
+	ExFreePool(Buffer); // Free Pool so there isnt a chance of Memory Leaks
 
 	// We added a reference to the PEPROCESS so we must dereference it again to make sure it's reference count is even
 	ObfDereferenceObject(Process);
@@ -109,6 +116,9 @@ NTSTATUS WVM(ULONG PID, MEMORY_REQUEST* sent) {
 	PVOID Address = (PVOID)sent->write.Address;
 	SIZE_T Size = sent->write.Size;
 	PVOID* Buffer = (PVOID*)ExAllocatePool(NonPagedPool, Size); // Pointer to Allocated Memory
+	
+	if (Buffer == NULL)
+		return STATUS_MEMORY_NOT_ALLOCATED;
 
 	memcpy(Buffer, sent->write.Value, Size); // Copy Value over to Buffer so we can Write with Buffer
 
@@ -145,6 +155,8 @@ NTSTATUS WVM(ULONG PID, MEMORY_REQUEST* sent) {
 
 	MmUnsecureVirtualMemory(Secure);
 	KeUnstackDetachProcess(&APC);
+	
+	ExFreePool(Buffer);
 
 	ObfDereferenceObject(Process);
 
