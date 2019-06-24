@@ -96,6 +96,16 @@ NTSTATUS RVM(ULONG PID, MEMORY_REQUEST* sent) {
 
 		// secure memory so information wont change, this could be placed above the query but might cause bsods
 		HANDLE Secure = MmSecureVirtualMemory(Address, Size, PAGE_READWRITE);
+		if (Secure == NULL) {
+			KeUnstackDetachProcess(&APC);
+
+			ExFreePool(Buffer);
+			ObfDereferenceObject(Process);
+
+			Status = STATUS_ACCESS_VIOLATION;
+
+			return Status;
+		}
 
 		ULONG flags = PAGE_EXECUTE_READWRITE | PAGE_READWRITE;
 		ULONG page = PAGE_GUARD | PAGE_NOACCESS;
@@ -188,6 +198,16 @@ NTSTATUS WVM(ULONG PID, MEMORY_REQUEST* sent) {
 		}
 
 		HANDLE Secure = MmSecureVirtualMemory(Address, Size, PAGE_READWRITE);
+		if (Secure == NULL) {
+			KeUnstackDetachProcess(&APC);
+
+			ExFreePool(Buffer);
+			ObfDereferenceObject(Process);
+
+			Status = STATUS_ACCESS_VIOLATION;
+
+			return Status;
+		}
 
 		ULONG flags = PAGE_EXECUTE_READWRITE | PAGE_READWRITE;
 		ULONG page = PAGE_GUARD | PAGE_NOACCESS;
