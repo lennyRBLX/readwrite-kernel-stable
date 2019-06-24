@@ -1,5 +1,6 @@
 #include "ntos.h"
 
+// type definitions
 typedef unsigned long long QWORD;
 typedef unsigned short WORD;
 typedef unsigned long DWORD, * PDWORD, * LPDWORD;
