@@ -14,6 +14,29 @@ cheat-engine - https://github.com/cheat-engine/cheat-engine/blob/master/DBKKerne
 
 */
 
+// structure definitions
+typedef struct _KERNEL_READ_REQUEST
+{
+	UINT64 Address; // Source
+	PVOID Response; // Target
+	SIZE_T Size;
+} KERNEL_READ_REQUEST, *PKERNEL_READ_REQUEST;
+
+typedef struct _KERNEL_WRITE_REQUEST
+{
+	UINT64 Address; // Target
+	PVOID Value; // Source
+	SIZE_T Size;
+} KERNEL_WRITE_REQUEST, *PKERNEL_WRITE_REQUEST;
+
+typedef struct _MEMORY_REQUEST
+{
+	ULONG ProcessId;
+	KERNEL_READ_REQUEST read;
+	KERNEL_WRITE_REQUEST write;
+} MEMORY_REQUEST;
+
+// method definitions
 NTSTATUS RVM(ULONG PID, MEMORY_REQUEST* sent) {
 	PEPROCESS Process;
 	KAPC_STATE APC;
