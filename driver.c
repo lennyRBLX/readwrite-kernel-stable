@@ -39,6 +39,8 @@ typedef struct _MEMORY_REQUEST
 
 // method definitions
 NTSTATUS RVM(ULONG PID, MEMORY_REQUEST* sent) {
+	if (sent == NULL || PID == 0) return STATUS_ABANDONED;
+	
 	PEPROCESS Process;
 	KAPC_STATE APC;
 	NTSTATUS Status = STATUS_FAIL_CHECK;
@@ -46,6 +48,9 @@ NTSTATUS RVM(ULONG PID, MEMORY_REQUEST* sent) {
 	// collect peprocess for stack attaching
 	if (!NT_SUCCESS(PsLookupProcessByProcessId((PVOID)PID, &Process)))
 		return STATUS_INVALID_PARAMETER_1;
+	
+	// double check memrequest inputs
+	if ((UINT64)sent->read == 0 || (UINT64)sent->read.Address < (UINT64)PsGetProcessSectionBaseAddress(Process) || sent->read.Size > 8 || sent->read.Size <= 0) return STATUS_ABANDONED;
 
 	// get usermode information, using it directly causes crashing
 	PVOID Address = (PVOID)sent->read.Address;
@@ -133,6 +138,8 @@ NTSTATUS RVM(ULONG PID, MEMORY_REQUEST* sent) {
 }
 
 NTSTATUS WVM(ULONG PID, MEMORY_REQUEST* sent) {
+	if (sent == NULL || PID == 0) return STATUS_ABANDONED;
+	
 	PEPROCESS Process;
 	KAPC_STATE APC;
 	NTSTATUS Status;
@@ -140,6 +147,9 @@ NTSTATUS WVM(ULONG PID, MEMORY_REQUEST* sent) {
 	if (!NT_SUCCESS(PsLookupProcessByProcessId((PVOID)PID, &Process)))
 		return STATUS_INVALID_PARAMETER_1;
 
+	// double check memrequest inputs
+	if ((UINT64)sent->write <= 0 || (UINT64)sent->write.Address < (UINT64)PsGetProcessSectionBaseAddress(Process) || sent->write.Size > 8 || sent->write.Size <= 0) return STATUS_ABANDONED;
+	
 	PVOID Address = (PVOID)sent->write.Address;
 	SIZE_T Size = sent->write.Size;
 
