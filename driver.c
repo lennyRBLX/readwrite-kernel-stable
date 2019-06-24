@@ -40,127 +40,175 @@ typedef struct _MEMORY_REQUEST
 NTSTATUS RVM(ULONG PID, MEMORY_REQUEST* sent) {
 	PEPROCESS Process;
 	KAPC_STATE APC;
+	NTSTATUS Status = STATUS_FAIL_CHECK;
 
-	if (!NT_SUCCESS(PsLookupProcessByProcessId((PVOID)PID, &Process))) // gets PEPROCESS from PID
+	// collect peprocess for stack attaching
+	if (!NT_SUCCESS(PsLookupProcessByProcessId((PVOID)PID, &Process)))
 		return STATUS_INVALID_PARAMETER_1;
 
-	// Gathers needed information from Usermode Buffer
+	// get usermode information, using it directly causes crashing
 	PVOID Address = (PVOID)sent->read.Address;
 	SIZE_T Size = sent->read.Size;
+
+	// allocate buffer so it isnt empty space when copying over
 	PVOID* Buffer = (PVOID*)ExAllocatePool(NonPagedPool, Size); // Pointer to Allocated Memory
-	
+
+	// verify buffer was allocated
 	if (Buffer == NULL)
 		return STATUS_MEMORY_NOT_ALLOCATED;
-	
-	*Buffer = (PVOID)1; // To ensure it isnt NULL
 
-	KeStackAttachProcess(Process, &APC);
+	*Buffer = (PVOID)1;
 
-	// Secures Virtual Memory to ensure Query is correct throughout testing & writing
-	HANDLE Secure = MmSecureVirtualMemory(Address, Size, PAGE_READWRITE);
-	MEMORY_BASIC_INFORMATION info;
+	__try {
+		// attach to processes stack, mmcopyvirtualmemory uses the same method
+		KeStackAttachProcess(Process, &APC);
 
-	// Gets information on Memory Block to ensure it is safe to Read / Write
-	if (!NT_SUCCESS(ZwQueryVirtualMemory(ZwCurrentProcess(), Address, MemoryBasicInformation, &info, sizeof(MEMORY_BASIC_INFORMATION), NULL))) {
+		// double check address is valid before gathering information on memory block
+		if (!MmIsAddressValid(Address)) {
+			KeUnstackDetachProcess(&APC);
+
+			ExFreePool(Buffer);
+			ObfDereferenceObject(Process);
+
+			Status = STATUS_INVALID_ADDRESS;
+
+			return Status;
+		}
+
+		// collect memory block information to verify block of memory is accessible
+		MEMORY_BASIC_INFORMATION info;
+		if (!NT_SUCCESS(ZwQueryVirtualMemory(ZwCurrentProcess(), Address, MemoryBasicInformation, &info, sizeof(MEMORY_BASIC_INFORMATION), NULL))) {
+			KeUnstackDetachProcess(&APC);
+
+			ExFreePool(Buffer);
+			ObfDereferenceObject(Process);
+
+			Status = STATUS_INVALID_ADDRESS_COMPONENT;
+
+			return Status;
+		}
+
+		// secure memory so information wont change, this could be placed above the query but might cause bsods
+		HANDLE Secure = MmSecureVirtualMemory(Address, Size, PAGE_READWRITE);
+
+		ULONG flags = PAGE_EXECUTE_READWRITE | PAGE_READWRITE;
+		ULONG page = PAGE_GUARD | PAGE_NOACCESS;
+
+		// check information against flags to verify memory block is within our standards
+		if (!(info.State & MEM_COMMIT) || !(info.Protect & flags) || (info.Protect & page)) {
+			MmUnsecureVirtualMemory(Secure);
+			KeUnstackDetachProcess(&APC);
+
+			ExFreePool(Buffer);
+			ObfDereferenceObject(Process);
+
+			Status = STATUS_ACCESS_DENIED;
+
+			return Status;
+		}
+
+		// read memory over to our buffer
+		memcpy(Buffer, Address, Size);
+
+		// cleanup, unsecure memory & detach from process
 		MmUnsecureVirtualMemory(Secure);
 		KeUnstackDetachProcess(&APC);
 
-		return STATUS_INVALID_PARAMETER_2;
+		// copy our buffer over to response, only way to keep the bytes from changing between transfer
+		memcpy(sent->read.Response, Buffer, Size);
+
+		Status = STATUS_SUCCESS;
 	}
-
-	// My personal flags, all the flags are available @ https://docs.microsoft.com/en-us/windows/desktop/Memory/memory-protection-constants
-	ULONG flags = PAGE_EXECUTE_READWRITE | PAGE_READWRITE;
-	ULONG page = PAGE_GUARD | PAGE_NOACCESS;
-
-	// Credits to Paracord for the if statement, this is basically copy & paste
-	if (!(info.State & MEM_COMMIT) || !(info.Protect & flags) || (info.Protect & page)) {
-		MmUnsecureVirtualMemory(Secure);
+	__except (EXCEPTION_EXECUTE_HANDLER) {
+		// if error is thrown just detach from process
 		KeUnstackDetachProcess(&APC);
-
-		return STATUS_ACCESS_DENIED;
 	}
 
-	// Double check if the Address is even valid, the function is technically just a wrapper for a try catch exception handler on reading the memory block
-	if (!MmIsAddressValid(Address)) {
-		MmUnsecureVirtualMemory(Secure);
-		KeUnstackDetachProcess(&APC);
-
-		return STATUS_INVALID_ADDRESS;
-	}
-
-	// Copy memory from Process -> Our Buffer
-	memcpy(Buffer, Address, Size);
-
-	// Unsecure the secure handle so we don't cause issues in the Process later down the line, AKA Cleanup
-	MmUnsecureVirtualMemory(Secure);
-	KeUnstackDetachProcess(&APC);
-
-	// Send Buffer value to Usermode
-	memcpy(sent->read.Response, Buffer, Size);
-	
-	ExFreePool(Buffer); // Free Pool so there isnt a chance of Memory Leaks
-
-	// We added a reference to the PEPROCESS so we must dereference it again to make sure it's reference count is even
+	// cleanup our buffer and peprocess, as we aren't using them anymore
+	ExFreePool(Buffer);
 	ObfDereferenceObject(Process);
 
-	return STATUS_SUCCESS;
+	return Status;
 }
 
 NTSTATUS WVM(ULONG PID, MEMORY_REQUEST* sent) {
 	PEPROCESS Process;
 	KAPC_STATE APC;
+	NTSTATUS Status;
 
 	if (!NT_SUCCESS(PsLookupProcessByProcessId((PVOID)PID, &Process)))
 		return STATUS_INVALID_PARAMETER_1;
 
 	PVOID Address = (PVOID)sent->write.Address;
 	SIZE_T Size = sent->write.Size;
+
 	PVOID* Buffer = (PVOID*)ExAllocatePool(NonPagedPool, Size); // Pointer to Allocated Memory
-	
+
 	if (Buffer == NULL)
 		return STATUS_MEMORY_NOT_ALLOCATED;
 
-	memcpy(Buffer, sent->write.Value, Size); // Copy Value over to Buffer so we can Write with Buffer
+	__try {
+		// copy memory over from usermode to kernel (application buffer -> driver buffer) so we can write with it
+		memcpy(Buffer, sent->write.Value, Size);
 
-	KeStackAttachProcess(Process, &APC);
+		KeStackAttachProcess(Process, &APC);
 
-	HANDLE Secure = MmSecureVirtualMemory(Address, Size, PAGE_READWRITE);
-	MEMORY_BASIC_INFORMATION info;
+		if (!MmIsAddressValid(Address)) {
+			KeUnstackDetachProcess(&APC);
 
-	if (!NT_SUCCESS(ZwQueryVirtualMemory(ZwCurrentProcess(), Address, MemoryBasicInformation, &info, sizeof(MEMORY_BASIC_INFORMATION), NULL))) {
+			ExFreePool(Buffer);
+			ObfDereferenceObject(Process);
+
+			Status = STATUS_INVALID_ADDRESS;
+
+			return Status;
+		}
+
+		MEMORY_BASIC_INFORMATION info;
+		if (!NT_SUCCESS(ZwQueryVirtualMemory(ZwCurrentProcess(), Address, MemoryBasicInformation, &info, sizeof(MEMORY_BASIC_INFORMATION), NULL))) {
+			KeUnstackDetachProcess(&APC);
+
+			ExFreePool(Buffer);
+			ObfDereferenceObject(Process);
+
+			Status = STATUS_INVALID_PARAMETER_2;
+
+			return Status;
+		}
+
+		HANDLE Secure = MmSecureVirtualMemory(Address, Size, PAGE_READWRITE);
+
+		ULONG flags = PAGE_EXECUTE_READWRITE | PAGE_READWRITE;
+		ULONG page = PAGE_GUARD | PAGE_NOACCESS;
+
+		if (!(info.State & MEM_COMMIT) || !(info.Protect & flags) || (info.Protect & page)) {
+			MmUnsecureVirtualMemory(Secure);
+			KeUnstackDetachProcess(&APC);
+
+			ExFreePool(Buffer);
+			ObfDereferenceObject(Process);
+
+			Status = STATUS_ACCESS_DENIED;
+
+			return Status;
+		}
+
+		// write our buffer over to process address
+		memcpy(Address, Buffer, Size);
+
 		MmUnsecureVirtualMemory(Secure);
 		KeUnstackDetachProcess(&APC);
 
-		return STATUS_INVALID_PARAMETER_2;
+		Status = STATUS_SUCCESS;
 	}
-
-	ULONG flags = PAGE_EXECUTE_READWRITE | PAGE_READWRITE;
-	ULONG page = PAGE_GUARD | PAGE_NOACCESS;
-
-	if (!(info.State & MEM_COMMIT) || !(info.Protect & flags) || (info.Protect & page)) {
-		MmUnsecureVirtualMemory(Secure);
+	__except (EXCEPTION_EXECUTE_HANDLER) {
 		KeUnstackDetachProcess(&APC);
-
-		return STATUS_ACCESS_DENIED;
 	}
 
-	if (!MmIsAddressValid(Address)) {
-		MmUnsecureVirtualMemory(Secure);
-		KeUnstackDetachProcess(&APC);
-
-		return STATUS_INVALID_ADDRESS;
-	}
-
-	memcpy(Address, Buffer, Size); // Switch arguements around to Write, instead of Reading
-
-	MmUnsecureVirtualMemory(Secure);
-	KeUnstackDetachProcess(&APC);
-	
 	ExFreePool(Buffer);
-
 	ObfDereferenceObject(Process);
 
-	return STATUS_SUCCESS;
+	return Status;
 }
 
 DRIVER_INITIALIZE DriverEntry;
