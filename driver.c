@@ -39,37 +39,30 @@ typedef struct _MEMORY_REQUEST
 
 // method definitions
 NTSTATUS RVM(ULONG PID, MEMORY_REQUEST* sent) {
-	if (sent == NULL || PID == 0) return STATUS_ABANDONED;
-	
 	PEPROCESS Process;
 	KAPC_STATE APC;
 	NTSTATUS Status = STATUS_FAIL_CHECK;
 
-	// collect peprocess for stack attaching
+	// lookup eprocess for use in attaching
 	if (!NT_SUCCESS(PsLookupProcessByProcessId((PVOID)PID, &Process)))
 		return STATUS_INVALID_PARAMETER_1;
-	
-	// double check memrequest inputs
-	if ((UINT64)sent->read == 0 || (UINT64)sent->read.Address < (UINT64)PsGetProcessSectionBaseAddress(Process) || sent->read.Size > 8 || sent->read.Size <= 0) return STATUS_ABANDONED;
 
-	// get usermode information, using it directly causes crashing
+	// create our own variables for usermode buffer, for some reason it will crash if we dont use these variables
 	PVOID Address = (PVOID)sent->read.Address;
 	SIZE_T Size = sent->read.Size;
 
-	// allocate buffer so it isnt empty space when copying over
+	// alocate memory for our driverbuffer, will be used to read memory from the process
 	PVOID* Buffer = (PVOID*)ExAllocatePool(NonPagedPool, Size); // Pointer to Allocated Memory
-
-	// verify buffer was allocated
 	if (Buffer == NULL)
 		return STATUS_MEMORY_NOT_ALLOCATED;
 
 	*Buffer = (PVOID)1;
 
 	__try {
-		// attach to processes stack, mmcopyvirtualmemory uses the same method
+		// attach
 		KeStackAttachProcess(Process, &APC);
 
-		// double check address is valid before gathering information on memory block
+		// verify address is valid before doing anything else
 		if (!MmIsAddressValid(Address)) {
 			KeUnstackDetachProcess(&APC);
 
@@ -81,7 +74,7 @@ NTSTATUS RVM(ULONG PID, MEMORY_REQUEST* sent) {
 			return Status;
 		}
 
-		// collect memory block information to verify block of memory is accessible
+		// query information on memory to verify it meets our requirements
 		MEMORY_BASIC_INFORMATION info;
 		if (!NT_SUCCESS(ZwQueryVirtualMemory(ZwCurrentProcess(), Address, MemoryBasicInformation, &info, sizeof(MEMORY_BASIC_INFORMATION), NULL))) {
 			KeUnstackDetachProcess(&APC);
@@ -94,7 +87,7 @@ NTSTATUS RVM(ULONG PID, MEMORY_REQUEST* sent) {
 			return Status;
 		}
 
-		// secure memory so information wont change, this could be placed above the query but might cause bsods
+		// secure memory so it doesnt change between the beginning of the request & the end, practically the same as doing ZwProtectVirtualMemory
 		HANDLE Secure = MmSecureVirtualMemory(Address, Size, PAGE_READWRITE);
 		if (Secure == NULL) {
 			KeUnstackDetachProcess(&APC);
@@ -110,7 +103,7 @@ NTSTATUS RVM(ULONG PID, MEMORY_REQUEST* sent) {
 		ULONG flags = PAGE_EXECUTE_READWRITE | PAGE_READWRITE;
 		ULONG page = PAGE_GUARD | PAGE_NOACCESS;
 
-		// check information against flags to verify memory block is within our standards
+		// confirm memory block meets our requirements
 		if (!(info.State & MEM_COMMIT) || !(info.Protect & flags) || (info.Protect & page)) {
 			MmUnsecureVirtualMemory(Secure);
 			KeUnstackDetachProcess(&APC);
@@ -123,24 +116,24 @@ NTSTATUS RVM(ULONG PID, MEMORY_REQUEST* sent) {
 			return Status;
 		}
 
-		// read memory over to our buffer
+		// read memory to our driver's buffer
 		memcpy(Buffer, Address, Size);
 
 		// cleanup, unsecure memory & detach from process
 		MmUnsecureVirtualMemory(Secure);
 		KeUnstackDetachProcess(&APC);
 
-		// copy our buffer over to response, only way to keep the bytes from changing between transfer
+		// read memory from our driver's buffer over to our usermode buffer
 		memcpy(sent->read.Response, Buffer, Size);
 
 		Status = STATUS_SUCCESS;
 	}
 	__except (EXCEPTION_EXECUTE_HANDLER) {
-		// if error is thrown just detach from process
+		// detach if anything goes wrong
 		KeUnstackDetachProcess(&APC);
 	}
 
-	// cleanup our buffer and peprocess, as we aren't using them anymore
+	// cleanup for us, deallocate buffer memory & deref eprocess as we added a ref
 	ExFreePool(Buffer);
 	ObfDereferenceObject(Process);
 
@@ -148,8 +141,6 @@ NTSTATUS RVM(ULONG PID, MEMORY_REQUEST* sent) {
 }
 
 NTSTATUS WVM(ULONG PID, MEMORY_REQUEST* sent) {
-	if (sent == NULL || PID == 0) return STATUS_ABANDONED;
-	
 	PEPROCESS Process;
 	KAPC_STATE APC;
 	NTSTATUS Status;
@@ -157,19 +148,16 @@ NTSTATUS WVM(ULONG PID, MEMORY_REQUEST* sent) {
 	if (!NT_SUCCESS(PsLookupProcessByProcessId((PVOID)PID, &Process)))
 		return STATUS_INVALID_PARAMETER_1;
 
-	// double check memrequest inputs
-	if ((UINT64)sent->write <= 0 || (UINT64)sent->write.Address < (UINT64)PsGetProcessSectionBaseAddress(Process) || sent->write.Size > 8 || sent->write.Size <= 0) return STATUS_ABANDONED;
-	
 	PVOID Address = (PVOID)sent->write.Address;
 	SIZE_T Size = sent->write.Size;
 
+	// allocate memory for our driver buffer
 	PVOID* Buffer = (PVOID*)ExAllocatePool(NonPagedPool, Size); // Pointer to Allocated Memory
-
 	if (Buffer == NULL)
 		return STATUS_MEMORY_NOT_ALLOCATED;
 
 	__try {
-		// copy memory over from usermode to kernel (application buffer -> driver buffer) so we can write with it
+		// copy our usermode buffer's value over to our driver's buffer
 		memcpy(Buffer, sent->write.Value, Size);
 
 		KeStackAttachProcess(Process, &APC);
@@ -224,7 +212,7 @@ NTSTATUS WVM(ULONG PID, MEMORY_REQUEST* sent) {
 			return Status;
 		}
 
-		// write our buffer over to process address
+		// send our driver's buffer to our applications memory address
 		memcpy(Address, Buffer, Size);
 
 		MmUnsecureVirtualMemory(Secure);
