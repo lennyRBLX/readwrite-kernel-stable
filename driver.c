@@ -15,13 +15,46 @@ cheat-engine - https://github.com/cheat-engine/cheat-engine/blob/master/DBKKerne
 
 */
 
+typedef struct _USERMODE_MODULE_ENTRY
+{
+	LIST_ENTRY64	InLoadOrderLinks;
+	LIST_ENTRY64	InMemoryOrderLinks;
+	LIST_ENTRY64	InInitializationOrderLinks;
+	PVOID			DllBase;
+	PVOID			EntryPoint;
+	ULONG			SizeOfImage;
+	UNICODE_STRING	FullDllName;
+	UNICODE_STRING 	BaseDllName;
+	ULONG			Flags;
+	USHORT			LoadCount;
+	USHORT			TlsIndex;
+	PVOID			SectionPointer;
+	ULONG			CheckSum;
+	PVOID			LoadedImports;
+	PVOID			EntryPointActivationContext;
+	PVOID			PatchInformation;
+	LIST_ENTRY64	ForwarderLinks;
+	LIST_ENTRY64	ServiceTagLinks;
+	LIST_ENTRY64	StaticLinks;
+	PVOID			ContextInformation;
+	ULONG64			OriginalBase;
+	LARGE_INTEGER	LoadTime;
+} USERMODE_MODULE_ENTRY, * PUSERMODE_MODULE_ENTRY;
+
 // structure definitions
+typedef struct _MODULE_INFO
+{
+	UINT64 Base;
+	ULONG Size;
+	WCHAR Name[1024];
+} MODULE_INFO, *PMODULE_INFO;
+
 typedef struct _KERNEL_READ_REQUEST
 {
 	UINT64 Address; // Source
 	PVOID Response; // Target
 	SIZE_T Size;
-} KERNEL_READ_REQUEST, *PKERNEL_READ_REQUEST;
+} KERNEL_READ_REQUEST, * PKERNEL_READ_REQUEST;
 
 typedef struct _KERNEL_WRITE_REQUEST
 {
@@ -30,14 +63,100 @@ typedef struct _KERNEL_WRITE_REQUEST
 	SIZE_T Size;
 } KERNEL_WRITE_REQUEST, *PKERNEL_WRITE_REQUEST;
 
+typedef struct _KERNEL_MODULE_REQUEST
+{
+	MODULE_INFO* buffer;
+	WCHAR moduleName[1024];
+} KERNEL_MODULE_REQUEST, * PKERNEL_MODULE_REQUEST;
+
 typedef struct _MEMORY_REQUEST
 {
 	ULONG ProcessId;
 	KERNEL_READ_REQUEST read;
 	KERNEL_WRITE_REQUEST write;
+	KERNEL_MODULE_REQUEST module;
 } MEMORY_REQUEST;
 
 // method definitions
+DWORD PEBLDR_OFFSET = 0x18; // peb.ldr
+DWORD PEBLDR_MEMORYLOADED_OFFSET = 0x20; // peb.ldr.InMemoryOrderModuleList
+NTSTATUS SPM(ULONG PID, MEMORY_REQUEST* sent) {
+	PEPROCESS Process;
+	KAPC_STATE APC;
+	NTSTATUS Status = STATUS_FAIL_CHECK;
+
+	if (!NT_SUCCESS(PsLookupProcessByProcessId((PVOID)PID, &Process)))
+		return STATUS_INVALID_PARAMETER_1;
+
+	PMODULE_INFO ModuleList = ExAllocatePool(PagedPool, sizeof(MODULE_INFO) * 512);
+	if (ModuleList == NULL)
+		return STATUS_MEMORY_NOT_ALLOCATED;
+
+	RtlZeroMemory(ModuleList, sizeof(MODULE_INFO) * 512);
+
+	PPEB Peb = PsGetProcessPeb(Process);
+	if (!Peb)
+		return STATUS_INVALID_PARAMETER_1;
+
+	__try {
+		KeStackAttachProcess(Process, &APC);
+
+		UINT64 Ldr = (UINT64)Peb + PEBLDR_OFFSET;
+		ProbeForRead((CONST PVOID)Ldr, 8, 8);
+
+		PLIST_ENTRY ModListHead = (PLIST_ENTRY)(*(PULONG64)Ldr + PEBLDR_MEMORYLOADED_OFFSET);
+		ProbeForRead((CONST PVOID)ModListHead, 8, 8);
+
+		PLIST_ENTRY Module = ModListHead->Flink;
+		
+		DWORD index = 0;
+		while (ModListHead != Module) {
+			PUSERMODE_MODULE_ENTRY Module_Ldr = (PUSERMODE_MODULE_ENTRY)(Module);
+
+			ModuleList[index].Base = Module_Ldr->DllBase;
+			ModuleList[index].Size = Module_Ldr->SizeOfImage;
+			RtlCopyMemory(ModuleList[index].Name, Module_Ldr->FullDllName.Buffer, Module_Ldr->FullDllName.Length);
+
+			Module = Module->Flink;
+			index++;
+
+			ProbeForRead((CONST PVOID)Module, 80, 8);
+		}
+
+		KeUnstackDetachProcess(&APC);
+
+		Status = STATUS_SUCCESS;
+	}
+	__except (EXCEPTION_EXECUTE_HANDLER)
+	{
+		KeUnstackDetachProcess(&APC);
+	}
+
+	WCHAR ModuleName[1024];
+
+	RtlZeroMemory(ModuleName, 1024);
+	wcsncpy(ModuleName, sent->module.moduleName, 1024);
+
+	MODULE_INFO SelectedModule;
+	for (DWORD i = 0; i < 512; i++) {
+		MODULE_INFO CurrentModule = ModuleList[i];
+
+		if (wcscmp(CurrentModule.Name, ModuleName) == 0) {
+			SelectedModule = CurrentModule;
+			break;
+		}
+	}
+
+	if (SelectedModule.Base != NULL && SelectedModule.Size != NULL) {
+		*(sent->module.buffer) = SelectedModule;
+	}
+
+	ExFreePool(ModuleList);
+	ObfDereferenceObject(Process);
+
+	return Status;
+}
+
 NTSTATUS RVM(ULONG PID, MEMORY_REQUEST* sent) {
 	PEPROCESS Process;
 	KAPC_STATE APC;
