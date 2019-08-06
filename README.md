@@ -1,4 +1,6 @@
 # readwrite-kernel-stable
+update: added search process modules into the driver
+
 a more stable &amp; secure read/write virtual memory for kernel mode drivers
 
 intended to be called using Kernel Function hooks, but could be fitted to be used with IOCTL's
