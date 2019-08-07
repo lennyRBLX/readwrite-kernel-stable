@@ -15,13 +15,13 @@ cheat-engine - https://github.com/cheat-engine/cheat-engine/blob/master/DBKKerne
 
 */
 
-typedef struct _USERMODE_MODULE_ENTRY
+typedef struct _LDR_DATA_TABLE_ENTRY
 {
 	LIST_ENTRY64	InLoadOrderLinks;
 	LIST_ENTRY64	InMemoryOrderLinks;
 	LIST_ENTRY64	InInitializationOrderLinks;
-	PVOID			DllBase;
-	PVOID			EntryPoint;
+	UINT64			DllBase;
+	UINT64			EntryPoint;
 	ULONG			SizeOfImage;
 	UNICODE_STRING	FullDllName;
 	UNICODE_STRING 	BaseDllName;
@@ -39,7 +39,7 @@ typedef struct _USERMODE_MODULE_ENTRY
 	PVOID			ContextInformation;
 	ULONG64			OriginalBase;
 	LARGE_INTEGER	LoadTime;
-} USERMODE_MODULE_ENTRY, * PUSERMODE_MODULE_ENTRY;
+} LDR_DATA_TABLE_ENTRY, * PLDR_DATA_TABLE_ENTRY;
 
 // structure definitions
 typedef struct _MODULE_INFO
@@ -79,7 +79,7 @@ typedef struct _MEMORY_REQUEST
 
 // method definitions
 DWORD PEBLDR_OFFSET = 0x18; // peb.ldr
-DWORD PEBLDR_MEMORYLOADED_OFFSET = 0x20; // peb.ldr.InMemoryOrderModuleList
+DWORD PEBLDR_MEMORYLOADED_OFFSET = 0x10; // peb.ldr.InMemoryOrderModuleList
 NTSTATUS SPM(ULONG PID, MEMORY_REQUEST* sent) {
 	PEPROCESS Process;
 	KAPC_STATE APC;
@@ -111,16 +111,14 @@ NTSTATUS SPM(ULONG PID, MEMORY_REQUEST* sent) {
 		
 		DWORD index = 0;
 		while (ModListHead != Module) {
-			PUSERMODE_MODULE_ENTRY Module_Ldr = (PUSERMODE_MODULE_ENTRY)(Module);
+			LDR_DATA_TABLE_ENTRY* Module_Ldr = (LDR_DATA_TABLE_ENTRY*)(Module);
 
 			ModuleList[index].Base = Module_Ldr->DllBase;
 			ModuleList[index].Size = Module_Ldr->SizeOfImage;
-			RtlCopyMemory(ModuleList[index].Name, Module_Ldr->FullDllName.Buffer, Module_Ldr->FullDllName.Length);
+			RtlCopyMemory(ModuleList[index].Name, Module_Ldr->BaseDllName.Buffer, Module_Ldr->BaseDllName.Length);
 
 			Module = Module->Flink;
 			index++;
-
-			ProbeForRead((CONST PVOID)Module, 80, 8);
 		}
 
 		KeUnstackDetachProcess(&APC);
@@ -132,6 +130,8 @@ NTSTATUS SPM(ULONG PID, MEMORY_REQUEST* sent) {
 		KeUnstackDetachProcess(&APC);
 	}
 
+	ModuleList[0].Base += (UINT64)PsGetProcessSectionBaseAddress(Process);
+
 	WCHAR ModuleName[1024];
 
 	RtlZeroMemory(ModuleName, 1024);
@@ -141,14 +141,14 @@ NTSTATUS SPM(ULONG PID, MEMORY_REQUEST* sent) {
 	for (DWORD i = 0; i < 512; i++) {
 		MODULE_INFO CurrentModule = ModuleList[i];
 
-		if (wcscmp(CurrentModule.Name, ModuleName) == 0) {
+		if (_wcsicmp(CurrentModule.Name, ModuleName) == 0) {
 			SelectedModule = CurrentModule;
 			break;
 		}
 	}
 
 	if (SelectedModule.Base != NULL && SelectedModule.Size != NULL) {
-		*(sent->module.buffer) = SelectedModule;
+		*sent->module.buffer = SelectedModule;
 	}
 
 	ExFreePool(ModuleList);
