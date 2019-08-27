@@ -163,21 +163,15 @@ NTSTATUS RVM(ULONG PID, MEMORY_REQUEST* sent) {
 	KAPC_STATE APC;
 	NTSTATUS Status = STATUS_FAIL_CHECK;
 
+	// lookup eprocess for use in attaching
 	if (!NT_SUCCESS(PsLookupProcessByProcessId((PVOID)PID, &Process)))
 		return STATUS_INVALID_PARAMETER_1;
 
+	// create our own variables for usermode buffer, for some reason it will crash if we dont use these variables
 	PVOID Address = (PVOID)sent->read.Address;
-	PVOID ProtectionAddress = (PVOID)sent->read.Address;
 	SIZE_T Size = sent->read.Size;
-	SIZE_T ProtectionSize = sent->read.Size;
 
-	if (0x0 >= Address || Address > 0x7FFFFFFFFFFFFFFFULL) {
-		ObfDereferenceObject(Process);
-
-		Status = STATUS_INVALID_ADDRESS;
-		return Status;
-	}
-
+	// alocate memory for our driverbuffer, will be used to read memory from the process
 	PVOID* Buffer = (PVOID*)ExAllocatePool(NonPagedPool, Size); // Pointer to Allocated Memory
 	if (Buffer == NULL)
 		return STATUS_MEMORY_NOT_ALLOCATED;
@@ -185,22 +179,25 @@ NTSTATUS RVM(ULONG PID, MEMORY_REQUEST* sent) {
 	*Buffer = (PVOID)1;
 
 	__try {
+		// attach
 		KeStackAttachProcess(Process, &APC);
 
+		// query information on memory to verify it meets our requirements
 		MEMORY_BASIC_INFORMATION info;
-		Status = ZwQueryVirtualMemory(ZwCurrentProcess(), Address, MemoryBasicInformation, &info, sizeof(MEMORY_BASIC_INFORMATION), NULL);
-		if (!NT_SUCCESS(Status)) {
+		if (!NT_SUCCESS(ZwQueryVirtualMemory(ZwCurrentProcess(), Address, MemoryBasicInformation, &info, sizeof(MEMORY_BASIC_INFORMATION), NULL))) {
 			KeUnstackDetachProcess(&APC);
 
 			ExFreePool(Buffer);
 			ObfDereferenceObject(Process);
 
+			Status = STATUS_INVALID_ADDRESS_COMPONENT;
+
 			return Status;
 		}
 
-		ULONG OldProtection;
-		Status = ZwProtectVirtualMemory(ZwCurrentProcess(), &ProtectionAddress, &ProtectionSize, PAGE_EXECUTE_READWRITE, &OldProtection);
-		if (!NT_SUCCESS(Status)) {
+		// secure memory so it doesnt change between the beginning of the request & the end, practically the same as doing ZwProtectVirtualMemory
+		HANDLE Secure = MmSecureVirtualMemory(Address, Size, PAGE_READWRITE);
+		if (Secure == NULL) {
 			KeUnstackDetachProcess(&APC);
 
 			ExFreePool(Buffer);
@@ -214,8 +211,9 @@ NTSTATUS RVM(ULONG PID, MEMORY_REQUEST* sent) {
 		ULONG flags = PAGE_EXECUTE_READWRITE | PAGE_READWRITE;
 		ULONG page = PAGE_GUARD | PAGE_NOACCESS;
 
+		// confirm memory block meets our requirements
 		if (!(info.State & MEM_COMMIT) || !(info.Protect & flags) || (info.Protect & page)) {
-			ZwProtectVirtualMemory(ZwCurrentProcess(), &ProtectionAddress, &ProtectionSize, OldProtection, &OldProtection);
+			MmUnsecureVirtualMemory(Secure);
 			KeUnstackDetachProcess(&APC);
 
 			ExFreePool(Buffer);
@@ -226,19 +224,24 @@ NTSTATUS RVM(ULONG PID, MEMORY_REQUEST* sent) {
 			return Status;
 		}
 
+		// read memory to our driver's buffer
 		memcpy(Buffer, Address, Size);
 
-		ZwProtectVirtualMemory(ZwCurrentProcess(), &ProtectionAddress, &ProtectionSize, OldProtection, &OldProtection);
+		// cleanup, unsecure memory & detach from process
+		MmUnsecureVirtualMemory(Secure);
 		KeUnstackDetachProcess(&APC);
 
+		// read memory from our driver's buffer over to our usermode buffer
 		memcpy(sent->read.Response, Buffer, Size);
 
 		Status = STATUS_SUCCESS;
 	}
 	__except (EXCEPTION_EXECUTE_HANDLER) {
+		// detach if anything goes wrong
 		KeUnstackDetachProcess(&APC);
 	}
 
+	// cleanup for us, deallocate buffer memory & deref eprocess as we added a ref
 	ExFreePool(Buffer);
 	ObfDereferenceObject(Process);
 
@@ -254,34 +257,33 @@ NTSTATUS WVM(ULONG PID, MEMORY_REQUEST* sent) {
 		return STATUS_INVALID_PARAMETER_1;
 
 	PVOID Address = (PVOID)sent->write.Address;
-	PVOID ProtectionAddress = (PVOID)sent->write.Address;
 	SIZE_T Size = sent->write.Size;
-	SIZE_T ProtectionSize = sent->write.Size;
-	BOOLEAN IsBytePatching = sent->write.BytePatching;
 
+	// allocate memory for our driver buffer
 	PVOID* Buffer = (PVOID*)ExAllocatePool(NonPagedPool, Size); // Pointer to Allocated Memory
 	if (Buffer == NULL)
 		return STATUS_MEMORY_NOT_ALLOCATED;
 
 	__try {
+		// copy our usermode buffer's value over to our driver's buffer
 		memcpy(Buffer, sent->write.Value, Size);
 
 		KeStackAttachProcess(Process, &APC);
 
 		MEMORY_BASIC_INFORMATION info;
-		Status = ZwQueryVirtualMemory(ZwCurrentProcess(), Address, MemoryBasicInformation, &info, sizeof(MEMORY_BASIC_INFORMATION), NULL);
-		if (!NT_SUCCESS(Status)) {
+		if (!NT_SUCCESS(ZwQueryVirtualMemory(ZwCurrentProcess(), Address, MemoryBasicInformation, &info, sizeof(MEMORY_BASIC_INFORMATION), NULL))) {
 			KeUnstackDetachProcess(&APC);
 
 			ExFreePool(Buffer);
 			ObfDereferenceObject(Process);
 
+			Status = STATUS_INVALID_PARAMETER_2;
+
 			return Status;
 		}
 
-		ULONG OldProtection;
-		Status = ZwProtectVirtualMemory(ZwCurrentProcess(), &ProtectionAddress, &ProtectionSize, PAGE_EXECUTE_READWRITE, &OldProtection);
-		if (!NT_SUCCESS(Status)) {
+		HANDLE Secure = MmSecureVirtualMemory(Address, Size, PAGE_READWRITE);
+		if (Secure == NULL) {
 			KeUnstackDetachProcess(&APC);
 
 			ExFreePool(Buffer);
@@ -292,26 +294,25 @@ NTSTATUS WVM(ULONG PID, MEMORY_REQUEST* sent) {
 			return Status;
 		}
 
-		if (IsBytePatching == FALSE) {
-			ULONG flags = PAGE_EXECUTE_READWRITE | PAGE_READWRITE;
-			ULONG page = PAGE_GUARD | PAGE_NOACCESS;
-			if (!(info.State & MEM_COMMIT) || !(info.Protect & flags) || (info.Protect & page)) {
-				ZwProtectVirtualMemory(ZwCurrentProcess(), &ProtectionAddress, &ProtectionSize, OldProtection, &OldProtection);
+		ULONG flags = PAGE_EXECUTE_READWRITE | PAGE_READWRITE;
+		ULONG page = PAGE_GUARD | PAGE_NOACCESS;
 
-				KeUnstackDetachProcess(&APC);
+		if (!(info.State & MEM_COMMIT) || !(info.Protect & flags) || (info.Protect & page)) {
+			MmUnsecureVirtualMemory(Secure);
+			KeUnstackDetachProcess(&APC);
 
-				ExFreePool(Buffer);
-				ObfDereferenceObject(Process);
+			ExFreePool(Buffer);
+			ObfDereferenceObject(Process);
 
-				Status = STATUS_ACCESS_DENIED;
+			Status = STATUS_ACCESS_DENIED;
 
-				return Status;
-			}
+			return Status;
 		}
-		
+
+		// send our driver's buffer to our applications memory address
 		memcpy(Address, Buffer, Size);
 
-		ZwProtectVirtualMemory(ZwCurrentProcess(), &ProtectionAddress, &ProtectionSize, OldProtection, &OldProtection);
+		MmUnsecureVirtualMemory(Secure);
 		KeUnstackDetachProcess(&APC);
 
 		Status = STATUS_SUCCESS;
