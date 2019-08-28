@@ -208,7 +208,8 @@ NTSTATUS RVM(ULONG PID, MEMORY_REQUEST* sent) {
 			return Status;
 		}
 
-		ULONG flags = PAGE_EXECUTE_READWRITE | PAGE_READWRITE;
+		// flags: https://docs.microsoft.com/en-us/windows/win32/memory/memory-protection-constants
+		ULONG flags = PAGE_EXECUTE_READWRITE | PAGE_READWRITE | PAGE_READONLY | PAGE_EXECUTE_READ | PAGE_WRITECOPY | PAGE_EXECUTE_WRITECOPY;
 		ULONG page = PAGE_GUARD | PAGE_NOACCESS;
 
 		// confirm memory block meets our requirements
