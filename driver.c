@@ -328,6 +328,87 @@ NTSTATUS WVM(ULONG PID, MEMORY_REQUEST* sent) {
 	return Status;
 }
 
+NTSTATUS WVMP(ULONG PID, MEMORY_REQUEST* sent) { // write virtual memory, with less restrictions, should only be used for byte patching in protected memory regions
+	PEPROCESS Process;
+	KAPC_STATE APC;
+	NTSTATUS Status;
+
+	if (!NT_SUCCESS(PsLookupProcessByProcessId((PVOID)PID, &Process)))
+		return STATUS_INVALID_PARAMETER_1;
+
+	PVOID Address = (PVOID)sent->write.Address;
+	PVOID ProtectedAddress = (PVOID)sent->write.Address;
+	SIZE_T Size = sent->write.Size;
+	SIZE_T ProtectedSize = sent->write.Size;
+
+	PVOID* Buffer = (PVOID*)ExAllocatePool(NonPagedPool, Size); // Pointer to Allocated Memory
+	if (Buffer == NULL) {
+		ObfDereferenceObject(Process);
+
+		return STATUS_MEMORY_NOT_ALLOCATED;
+	}
+
+	RtlSecureZeroMemory(Buffer, Size);
+
+	__try {
+		memcpy(Buffer, sent->write.Value, Size);
+
+		KeStackAttachProcess(Process, &APC);
+
+		ULONG OldProtection;
+		Status = ZwProtectVirtualMemory(ZwCurrentProcess(), &ProtectedAddress, &ProtectedSize, PAGE_EXECUTE_READWRITE, &OldProtection);
+		if (!NT_SUCCESS(Status)) {
+			KeUnstackDetachProcess(&APC);
+
+			ExFreePool(Buffer);
+			ObfDereferenceObject(Process);
+
+			return Status;
+		}
+
+		ProtectedAddress = Address;
+		ProtectedSize = Size;
+
+		MEMORY_BASIC_INFORMATION info;
+		Status = ZwQueryVirtualMemory(ZwCurrentProcess(), Address, MemoryBasicInformation, &info, sizeof(MEMORY_BASIC_INFORMATION), NULL);
+		if (!NT_SUCCESS(Status)) {
+			KeUnstackDetachProcess(&APC);
+
+			ExFreePool(Buffer);
+			ObfDereferenceObject(Process);
+
+			return Status;
+		}
+
+		if (!(info.State & MEM_COMMIT)) {
+			ZwProtectVirtualMemory(ZwCurrentProcess(), &ProtectedAddress, &ProtectedSize, OldProtection, &OldProtection);
+			KeUnstackDetachProcess(&APC);
+
+			ExFreePool(Buffer);
+			ObfDereferenceObject(Process);
+
+			Status = STATUS_ACCESS_DENIED;
+
+			return Status;
+		}
+
+		memcpy(Address, Buffer, Size);
+
+		ZwProtectVirtualMemory(ZwCurrentProcess(), &ProtectedAddress, &ProtectedSize, OldProtection, &OldProtection);
+		KeUnstackDetachProcess(&APC);
+
+		Status = STATUS_SUCCESS;
+	}
+	__except (EXCEPTION_EXECUTE_HANDLER) {
+		KeUnstackDetachProcess(&APC);
+	}
+
+	ExFreePool(Buffer);
+	ObfDereferenceObject(Process);
+
+	return Status;
+}
+
 DRIVER_INITIALIZE DriverEntry;
 NTSTATUS DriverEntry(PDRIVER_OBJECT pDriverObject, PUNICODE_STRING pRegistryPath)
 {
