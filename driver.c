@@ -160,8 +160,6 @@ NTSTATUS SPM(ULONG PID, MEMORY_REQUEST* sent) {
 
 NTSTATUS RVM(ULONG PID, MEMORY_REQUEST* sent) {
 	PEPROCESS Process;
-	KAPC_STATE APC;
-	NTSTATUS Status = STATUS_FAIL_CHECK;
 
 	// lookup eprocess for use in attaching
 	if (!NT_SUCCESS(PsLookupProcessByProcessId((PVOID)PID, &Process)))
@@ -173,10 +171,16 @@ NTSTATUS RVM(ULONG PID, MEMORY_REQUEST* sent) {
 
 	// alocate memory for our driverbuffer, will be used to read memory from the process
 	PVOID* Buffer = (PVOID*)ExAllocatePool(NonPagedPool, Size); // Pointer to Allocated Memory
-	if (Buffer == NULL)
-		return STATUS_MEMORY_NOT_ALLOCATED;
+	if (Buffer == NULL) {
+		ObfDereferenceObject(Process);
 
-	*Buffer = (PVOID)1;
+		return STATUS_MEMORY_NOT_ALLOCATED;
+	}
+
+	RtlSecureZeroMemory(Buffer, Size);
+
+	KAPC_STATE APC;
+	NTSTATUS Status = STATUS_FAIL_CHECK;
 
 	__try {
 		// attach
@@ -195,6 +199,21 @@ NTSTATUS RVM(ULONG PID, MEMORY_REQUEST* sent) {
 			return Status;
 		}
 
+		ULONG flags = PAGE_EXECUTE_READWRITE | PAGE_READWRITE | PAGE_EXECUTE_READ;
+		ULONG page = PAGE_GUARD | PAGE_NOACCESS;
+
+		// confirm memory block meets our requirements
+		if (!(info.State & MEM_COMMIT) || !(info.Protect & flags) || (info.Protect & page)) {
+			KeUnstackDetachProcess(&APC);
+
+			ExFreePool(Buffer);
+			ObfDereferenceObject(Process);
+
+			Status = STATUS_ACCESS_DENIED;
+
+			return Status;
+		}
+
 		// secure memory so it doesnt change between the beginning of the request & the end, practically the same as doing ZwProtectVirtualMemory
 		HANDLE Secure = MmSecureVirtualMemory(Address, Size, PAGE_READWRITE);
 		if (Secure == NULL) {
@@ -208,19 +227,13 @@ NTSTATUS RVM(ULONG PID, MEMORY_REQUEST* sent) {
 			return Status;
 		}
 
-		// flags: https://docs.microsoft.com/en-us/windows/win32/memory/memory-protection-constants
-		ULONG flags = PAGE_EXECUTE_READWRITE | PAGE_READWRITE | PAGE_READONLY | PAGE_EXECUTE_READ | PAGE_WRITECOPY | PAGE_EXECUTE_WRITECOPY;
-		ULONG page = PAGE_GUARD | PAGE_NOACCESS;
-
-		// confirm memory block meets our requirements
-		if (!(info.State & MEM_COMMIT) || !(info.Protect & flags) || (info.Protect & page)) {
-			MmUnsecureVirtualMemory(Secure);
+		if (MmIsAddressValid(Address) == FALSE) {
 			KeUnstackDetachProcess(&APC);
 
 			ExFreePool(Buffer);
 			ObfDereferenceObject(Process);
 
-			Status = STATUS_ACCESS_DENIED;
+			Status = STATUS_ACCESS_VIOLATION;
 
 			return Status;
 		}
@@ -251,8 +264,6 @@ NTSTATUS RVM(ULONG PID, MEMORY_REQUEST* sent) {
 
 NTSTATUS WVM(ULONG PID, MEMORY_REQUEST* sent) {
 	PEPROCESS Process;
-	KAPC_STATE APC;
-	NTSTATUS Status;
 
 	if (!NT_SUCCESS(PsLookupProcessByProcessId((PVOID)PID, &Process)))
 		return STATUS_INVALID_PARAMETER_1;
@@ -262,8 +273,16 @@ NTSTATUS WVM(ULONG PID, MEMORY_REQUEST* sent) {
 
 	// allocate memory for our driver buffer
 	PVOID* Buffer = (PVOID*)ExAllocatePool(NonPagedPool, Size); // Pointer to Allocated Memory
-	if (Buffer == NULL)
+	if (Buffer == NULL) {
+		ObfDereferenceObject(Process);
+
 		return STATUS_MEMORY_NOT_ALLOCATED;
+	}
+
+	RtlSecureZeroMemory(Buffer, Size);
+
+	KAPC_STATE APC;
+	NTSTATUS Status = STATUS_FAIL_CHECK;
 
 	__try {
 		// copy our usermode buffer's value over to our driver's buffer
@@ -283,6 +302,20 @@ NTSTATUS WVM(ULONG PID, MEMORY_REQUEST* sent) {
 			return Status;
 		}
 
+		ULONG flags = PAGE_EXECUTE_READWRITE | PAGE_READWRITE;
+		ULONG page = PAGE_GUARD | PAGE_NOACCESS;
+
+		if (!(info.State & MEM_COMMIT) || !(info.Protect & flags) || (info.Protect & page)) {
+			KeUnstackDetachProcess(&APC);
+
+			ExFreePool(Buffer);
+			ObfDereferenceObject(Process);
+
+			Status = STATUS_ACCESS_DENIED;
+
+			return Status;
+		}
+
 		HANDLE Secure = MmSecureVirtualMemory(Address, Size, PAGE_READWRITE);
 		if (Secure == NULL) {
 			KeUnstackDetachProcess(&APC);
@@ -295,17 +328,13 @@ NTSTATUS WVM(ULONG PID, MEMORY_REQUEST* sent) {
 			return Status;
 		}
 
-		ULONG flags = PAGE_EXECUTE_READWRITE | PAGE_READWRITE;
-		ULONG page = PAGE_GUARD | PAGE_NOACCESS;
-
-		if (!(info.State & MEM_COMMIT) || !(info.Protect & flags) || (info.Protect & page)) {
-			MmUnsecureVirtualMemory(Secure);
+		if (MmIsAddressValid(Address) == FALSE) {
 			KeUnstackDetachProcess(&APC);
 
 			ExFreePool(Buffer);
 			ObfDereferenceObject(Process);
 
-			Status = STATUS_ACCESS_DENIED;
+			Status = STATUS_ACCESS_VIOLATION;
 
 			return Status;
 		}
