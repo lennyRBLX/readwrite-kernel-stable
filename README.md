@@ -1,4 +1,6 @@
 # readwrite-kernel-stable
+edit: hello, this project is deprecated and will not be updated anymore, these are also poorly written and unlikely to be really stable in any situation
+
 update: added search process modules into the driver
 
 a more stable &amp; secure read/write virtual memory for kernel mode drivers
